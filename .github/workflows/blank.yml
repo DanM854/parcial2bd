@@ -47,5 +47,5 @@ jobs:
       - name: Upload scripts to S3
         run: |
           source .venv/bin/activate
-          aws s3 cp dim_date_etl.py s3://aws-glue-assets-122323568198-us-east-1/a/dim_date_etl.py
+          aws s3 cp main.py s3://aws-glue-assets-122323568198-us-east-1/a/dim_date_etl.py
           aws s3 cp test_main.py s3://aws-glue-assets-122323568198-us-east-1/a/test_main.py
