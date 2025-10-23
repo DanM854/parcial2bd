@@ -34,7 +34,7 @@ df_date["month_name"] = pd.to_datetime(df_date["date"]).dt.strftime("%B")
 df_date["day"] = pd.to_datetime(df_date["date"]).dt.day
 df_date["day_name"] = pd.to_datetime(df_date["date"]).dt.strftime("%A")
 df_date["quarter"] = "Q" + pd.to_datetime(df_date["date"]).dt.quarter.astype(str)
-df_date["is_weekend"] = pd.to_datetime(df_date["date"]).dt.weekday >= 1
+df_date["is_weekend"] = pd.to_datetime(df_date["date"]).dt.weekday < 5
 df_date["is_holiday_us"] = df_date["date"].isin(us_holidays)
 
 # === Definir esquema Parquet con tipo DATE correcto ===
