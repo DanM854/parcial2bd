@@ -19,8 +19,9 @@ def create_dim_date(df_fact):
     df_date["day"] = pd.to_datetime(df_date["date"]).dt.day
     df_date["day_name"] = pd.to_datetime(df_date["date"]).dt.strftime("%A")
     df_date["quarter"] = "Q" + pd.to_datetime(df_date["date"]).dt.quarter.astype(str)
-    df_date["is_weekend"] = pd.to_datetime(df_date["date"]).dt.weekday >= 5
-    df_date["is_holiday_us"] = df_date["date"].apply(lambda d: d in us_holidays)
+    df_date["is_weekend"] = pd.to_datetime(df_date["date"]).dt.weekday < 5  
+    df_date["is_holiday_us"] = df_date["date"].isin(us_holidays)
+
     return df_date
 
 
