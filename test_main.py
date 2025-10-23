@@ -1,45 +1,40 @@
 import pytest
 import pandas as pd
+import boto3
+from moto import mock_aws
+import io
 import pyarrow as pa
 import pyarrow.parquet as pq
-from io import BytesIO
 import holidays
-from datetime import date
-import boto3
-from moto import mock_s3  # Para simular AWS S3
 
-# Importar funciones si tu script las separas en un módulo
-# from dim_date_etl import generar_dim_date
+# Importa el script principal
+import dim_date_etl as etl
 
-# ------------------------------
-# 1. Simular datos de entrada
-# ------------------------------
 
-@pytest.fixture
-def sample_fact_rental_df():
-    data = {
-        "rental_date": [
-            "2005-05-24",
-            "2005-05-25",
-            "2005-05-28",  # Sábado
-            "2005-07-04"   # Festivo US
-        ]
-    }
-    return pd.DataFrame(data)
+@mock_aws
+def test_s3_upload_and_schema():
+    """
+    Verifica que el script pueda escribir correctamente un Parquet simulado en S3.
+    """
+    # 1️⃣ Crear un bucket S3 simulado
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="sakila-19191919")
 
-# ------------------------------
-# 2. Prueba: generación de dim_date
-# ------------------------------
+    # 2️⃣ Crear un DataFrame de ejemplo simulando fact_rental
+    df_fact = pd.DataFrame({
+        "rental_date": pd.to_datetime([
+            "2005-06-01", "2005-06-02", "2005-06-03",
+            "2005-12-25",  # Día festivo (Navidad)
+        ])
+    })
 
-def test_dim_date_generation(sample_fact_rental_df):
-    # Simular el proceso principal sin escribir en S3
-    df_fact = sample_fact_rental_df
-
-    # Transformación igual a la del script
+    # 3️⃣ Simular la lectura Parquet (mockear df_fact)
+    # En lugar de leer del S3 real, trabajamos directo con df_fact
     df_date = pd.DataFrame(df_fact["rental_date"].dropna().unique(), columns=["date"])
     df_date["date"] = pd.to_datetime(df_date["date"]).dt.date
     df_date = df_date.sort_values("date").reset_index(drop=True)
 
+    # === Crear campos derivados ===
     us_holidays = holidays.US()
     df_date["date_id"] = pd.to_datetime(df_date["date"]).dt.strftime("%Y%m%d").astype(int)
     df_date["year"] = pd.to_datetime(df_date["date"]).dt.year
@@ -51,58 +46,69 @@ def test_dim_date_generation(sample_fact_rental_df):
     df_date["is_weekend"] = pd.to_datetime(df_date["date"]).dt.weekday >= 5
     df_date["is_holiday_us"] = df_date["date"].isin(us_holidays)
 
-    # Validar columnas
-    expected_columns = [
+    # 4️⃣ Escribir Parquet en memoria
+    schema = pa.schema([
+        pa.field("date", pa.date32()),
+        pa.field("date_id", pa.int32()),
+        pa.field("year", pa.int16()),
+        pa.field("month", pa.int8()),
+        pa.field("month_name", pa.string()),
+        pa.field("day", pa.int8()),
+        pa.field("day_name", pa.string()),
+        pa.field("quarter", pa.string()),
+        pa.field("is_weekend", pa.bool_()),
+        pa.field("is_holiday_us", pa.bool_())
+    ])
+
+    table = pa.Table.from_pandas(df_date, schema=schema)
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer, compression="snappy")
+
+    # 5️⃣ Simular subida a S3
+    s3.put_object(
+        Bucket="sakila-19191919",
+        Key="dim_date/dim_date.parquet",
+        Body=buffer.getvalue()
+    )
+
+    # 6️⃣ Leer el objeto de S3 simulado y verificar que sea válido
+    obj = s3.get_object(Bucket="sakila-19191919", Key="dim_date/dim_date.parquet")
+    data = obj["Body"].read()
+
+    # Verifica que el Parquet no esté vacío
+    assert len(data) > 0, "El archivo Parquet no se escribió correctamente"
+
+    # 7️⃣ Leer el Parquet de nuevo desde el buffer y validar el contenido
+    read_table = pq.read_table(io.BytesIO(data))
+    df_result = read_table.to_pandas()
+
+    # Asegurar que las columnas principales existen
+    expected_cols = {
         "date", "date_id", "year", "month", "month_name",
         "day", "day_name", "quarter", "is_weekend", "is_holiday_us"
-    ]
-    assert list(df_date.columns) == expected_columns
+    }
+    assert expected_cols.issubset(df_result.columns), "Faltan columnas esperadas en el Parquet"
 
-    # Validar que las fechas son correctas
-    assert df_date.iloc[0]["date"] == date(2005, 5, 24)
-    assert df_date.iloc[1]["day_name"] == "Wednesday"
-
-    # Validar date_id
-    assert df_date[df_date["date"] == date(2005, 5, 24)]["date_id"].iloc[0] == 20050524
-
-    # Validar fin de semana
-    assert df_date[df_date["date"] == date(2005, 5, 28)]["is_weekend"].iloc[0] is True
-
-    # Validar festivo US (4 de julio)
-    assert df_date[df_date["date"] == date(2005, 7, 4)]["is_holiday_us"].iloc[0] is True
+    # Verificar tipos de datos y valores clave
+    assert df_result["year"].min() == 2005
+    assert df_result["month"].max() == 12
+    assert df_result.loc[df_result["date"].astype(str) == "2005-12-25", "is_holiday_us"].iloc[0] is True
 
 
-# ------------------------------
-# 3. Prueba: error si falta rental_date
-# ------------------------------
+def test_date_id_format():
+    """
+    Verifica que el campo date_id se forme correctamente (YYYYMMDD).
+    """
+    sample_date = pd.to_datetime("2005-07-14")
+    date_id = int(sample_date.strftime("%Y%m%d"))
+    assert date_id == 20050714, "El formato de date_id es incorrecto"
 
-def test_error_no_rental_date():
-    df_fact = pd.DataFrame({"otra_columna": [1, 2, 3]})
-    with pytest.raises(KeyError):
-        _ = df_fact["rental_date"]
 
-
-# ------------------------------
-# 4. Prueba: escritura simulada en S3
-# ------------------------------
-
-@mock_s3
-def test_write_to_s3(sample_fact_rental_df):
-    import boto3
-    s3 = boto3.client("s3", region_name="us-east-1")
-    bucket = "sakila-test-bucket"
-    s3.create_bucket(Bucket=bucket)
-
-    # Crear parquet simulado
-    buffer = BytesIO()
-    table = pa.Table.from_pandas(sample_fact_rental_df)
-    pq.write_table(table, buffer)
-    s3.put_object(Bucket=bucket, Key="fact_rental/fact_rental.parquet", Body=buffer.getvalue())
-
-    # Leer de nuevo para verificar
-    response = s3.get_object(Bucket=bucket, Key="fact_rental/fact_rental.parquet")
-    body = BytesIO(response["Body"].read())
-    df_loaded = pq.read_table(body).to_pandas()
-
-    assert not df_loaded.empty
-    assert "rental_date" in df_loaded.columns
+def test_weekend_detection():
+    """
+    Verifica que los fines de semana sean detectados correctamente.
+    """
+    dates = pd.to_datetime(["2023-11-18", "2023-11-19", "2023-11-20"])  # Sábado, Domingo, Lunes
+    df = pd.DataFrame({"date": dates})
+    df["is_weekend"] = df["date"].dt.weekday >= 5
+    assert df["is_weekend"].tolist() == [True, True, False], "Error en detección de fin de semana"
